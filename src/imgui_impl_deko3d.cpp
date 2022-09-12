@@ -75,13 +75,6 @@ static void loadShader(DkShader *pShader, const char *path,
   dkShaderInitialize(pShader, &shaderMaker);
 }
 
-static void InitSwitch(ImGui_ImplDeko3d_Data *bd) {
-  romfsInit();
-  // Initialize the default gamepad
-  padConfigureInput(1, HidNpadStyleSet_NpadStandard);
-  padInitializeDefault(&bd->pad);
-}
-
 static void InitDeko3dData(ImGui_ImplDeko3d_Data *bd) {
   // Create the device, which is the root object
   DkDeviceMaker deviceMaker;
@@ -195,6 +188,10 @@ static void InitDeko3dData(ImGui_ImplDeko3d_Data *bd) {
   dkQueueMakerDefaults(&queueMaker, g_device);
   queueMaker.flags = DkQueueFlags_Graphics;
   bd->g_renderQueue = dkQueueCreate(&queueMaker);
+
+  // Initialize the default gamepad
+  padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+  padInitializeDefault(&bd->pad);
 }
 
 static void DestroyDeko3dData(ImGui_ImplDeko3d_Data *bd) {
@@ -267,9 +264,65 @@ void ImGui_ImplDeko3d_Shutdown() {
   DestroyDeko3dData(bd);
 }
 
+uint64_t ImGui_ImplDeko3d_UpdatePad() {
+  ImGuiIO &io = ImGui::GetIO();
+  ImGui_ImplDeko3d_Data *bd = ImGui_ImplDeko3d_GetBackendData();
+
+  padUpdate(&bd->pad);
+  const u64 down = padGetButtonsDown(&bd->pad);
+  const u64 up = padGetButtonsUp(&bd->pad);
+
+  HidTouchScreenState state = {0};
+  hidGetTouchScreenStates(&state, 1);
+  static bool touch_down = false;
+  if (state.count < 1) {
+    if (touch_down) {
+      touch_down = false;
+      io.AddMouseButtonEvent(0, false);
+    }
+  } else {
+    float x, y;
+    x = state.touches[0].x;
+    y = state.touches[0].y;
+    io.AddMousePosEvent(x, y);
+    touch_down = true;
+    io.AddMouseButtonEvent(0, true);
+  }
+
+  constexpr int mapping[][2] = {
+      {ImGuiKey_GamepadFaceDown, HidNpadButton_A},
+      {ImGuiKey_GamepadFaceRight, HidNpadButton_B},
+      {ImGuiKey_GamepadFaceUp, HidNpadButton_X},
+      {ImGuiKey_GamepadFaceLeft, HidNpadButton_Y},
+      {ImGuiKey_GamepadL1, HidNpadButton_L},
+      {ImGuiKey_GamepadR1, HidNpadButton_R},
+      {ImGuiKey_GamepadL2, HidNpadButton_ZL},
+      {ImGuiKey_GamepadR2, HidNpadButton_ZR},
+      {ImGuiKey_GamepadStart, HidNpadButton_Plus},
+      {ImGuiKey_GamepadBack, HidNpadButton_Minus},
+      {ImGuiKey_GamepadDpadLeft, HidNpadButton_Left},
+      {ImGuiKey_GamepadDpadRight, HidNpadButton_Right},
+      {ImGuiKey_GamepadDpadUp, HidNpadButton_Up},
+      {ImGuiKey_GamepadDpadDown, HidNpadButton_Down},
+      {ImGuiKey_GamepadLStickLeft, HidNpadButton_StickLLeft},
+      {ImGuiKey_GamepadLStickRight, HidNpadButton_StickLRight},
+      {ImGuiKey_GamepadLStickUp, HidNpadButton_StickLUp},
+      {ImGuiKey_GamepadLStickDown, HidNpadButton_StickLDown},
+  };
+
+  for (int i = 0; i < sizeof(mapping) / sizeof(mapping[0]); ++i) {
+    int im_k = mapping[i][0], nx_k = mapping[i][1];
+    if (down & nx_k)
+      io.AddKeyEvent(im_k, true);
+    else if (up & nx_k)
+      io.AddKeyEvent(im_k, false);
+  }
+
+  return up;
+}
+
 void ImGui_ImplDeko3d_NewFrame() {
   // io.DeltaTime = 1.0f / 60.0f; // TODO
-  // armGetSystemTick();
 }
 
 static void graphicsUpdate(ImGui_ImplDeko3d_Data *bd) {

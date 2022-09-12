@@ -31,14 +31,9 @@ int main(int argc, char *argv[]) {
 
   ImGui_ImplDeko3d_Init();
 
-  padConfigureInput(1, HidNpadStyleSet_NpadStandard);
-  PadState pad;
-  padInitializeDefault(&pad);
-
   while (appletMainLoop()) {
-    padUpdate(&pad);
-    u64 kDown = padGetButtonsDown(&pad);
-    if (kDown & HidNpadButton_Plus)
+    u64 down = ImGui_ImplDeko3d_UpdatePad();
+    if (down & HidNpadButton_Plus)
       break;
 
     ImGui_ImplDeko3d_NewFrame();
