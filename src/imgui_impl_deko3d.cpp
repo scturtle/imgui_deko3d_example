@@ -13,13 +13,16 @@
 
 #define FB_NUM 2
 
-#define CODEMEMSIZE (64 * 1024)
+#define CODEMEMSIZE (4 * 1024)
 #define CMDMEMSIZE (16 * 1024)
+#define UBOMEMSIZE (4 * 1024)
+#define VTXMEMSIZE (1024 * 1024)
+#define IDXMEMSIZE (1024 * 1024)
 
-#define FB_WIDTH 1920
-#define FB_HEIGHT 1080
-// #define FB_WIDTH 1280
-// #define FB_HEIGHT 720
+// #define FB_WIDTH 1920
+// #define FB_HEIGHT 1080
+#define FB_WIDTH 1280
+#define FB_HEIGHT 720
 
 struct ImGui_ImplDeko3d_Data {
   DkDevice g_device;
@@ -28,9 +31,15 @@ struct ImGui_ImplDeko3d_Data {
   DkSwapchain g_swapchain;
 
   DkMemBlock g_codeMemBlock;
-  uint32_t g_codeMemOffset;
   DkShader g_vertexShader;
   DkShader g_fragmentShader;
+
+  DkMemBlock g_uboMemBlock;
+  DkMemBlock g_vtxMemBlock[FB_NUM];
+  DkMemBlock g_idxMemBlock[FB_NUM];
+
+  DkMemBlock g_depthMemBlock;
+  DkImage g_depthbuffer;
 
   DkMemBlock g_cmdbufMemBlock;
   DkCmdBuf g_cmdbuf;
@@ -50,29 +59,103 @@ static ImGui_ImplDeko3d_Data *ImGui_ImplDeko3d_GetBackendData() {
              : NULL;
 }
 
-static void loadShader(DkShader *pShader, const char *path,
-                       DkMemBlock g_codeMemBlock, uint32_t &g_codeMemOffset) {
+static inline uint32_t align(uint32_t size, uint32_t align) {
+  return (size + align - 1) & ~(align - 1);
+}
+
+static void loadShader(DkShader *shader, const char *path,
+                       DkMemBlock g_codeMemBlock, uint32_t &codeMemOffset) {
   FILE *f = fopen(path, "rb");
   fseek(f, 0, SEEK_END);
   uint32_t size = ftell(f);
   rewind(f);
 
-  // Look for a spot in the code memory block for loading this shader. Note that
-  // we are just using a simple incremental offset; this isn't a general purpose
-  // allocation algorithm.
-  uint32_t codeOffset = g_codeMemOffset;
-  g_codeMemOffset +=
-      (size + DK_SHADER_CODE_ALIGNMENT - 1) & ~(DK_SHADER_CODE_ALIGNMENT - 1);
+  uint32_t codeOffset = codeMemOffset;
+  codeMemOffset += align(size, DK_SHADER_CODE_ALIGNMENT);
 
-  // Read the file into memory, and close the file
-  fread((uint8_t *)dkMemBlockGetCpuAddr(g_codeMemBlock) + codeOffset, size, 1,
-        f);
+  fread((char *)dkMemBlockGetCpuAddr(g_codeMemBlock) + codeOffset, size, 1, f);
   fclose(f);
 
-  // Initialize the user provided shader object with the code we've just loaded
   DkShaderMaker shaderMaker;
   dkShaderMakerDefaults(&shaderMaker, g_codeMemBlock, codeOffset);
-  dkShaderInitialize(pShader, &shaderMaker);
+  dkShaderInitialize(shader, &shaderMaker);
+}
+
+static void InitDeko3Shaders(ImGui_ImplDeko3d_Data *bd) {
+  DkDevice g_device = bd->g_device;
+  // Create a memory block onto which we will load shader code
+  DkMemBlockMaker memBlockMaker;
+  IM_ASSERT(CODEMEMSIZE == align(CODEMEMSIZE, DK_MEMBLOCK_ALIGNMENT));
+  dkMemBlockMakerDefaults(&memBlockMaker, g_device, CODEMEMSIZE);
+  memBlockMaker.flags = DkMemBlockFlags_CpuUncached |
+                        DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code;
+  bd->g_codeMemBlock = dkMemBlockCreate(&memBlockMaker);
+
+  // Load our shaders (both vertex and fragment)
+  uint32_t codeMemOffset = 0;
+  loadShader(&bd->g_vertexShader, "romfs:/shaders/imgui_vsh.dksh",
+             bd->g_codeMemBlock, codeMemOffset);
+  loadShader(&bd->g_fragmentShader, "romfs:/shaders/imgui_fsh.dksh",
+             bd->g_codeMemBlock, codeMemOffset);
+  IM_ASSERT(codeMemOffset + DK_SHADER_CODE_UNUSABLE_SIZE <= CODEMEMSIZE);
+}
+
+static void InitDeko3dSwapchain(ImGui_ImplDeko3d_Data *bd) {
+  DkDevice g_device = bd->g_device;
+  DkMemBlockMaker memBlockMaker;
+  DkImageLayoutMaker layoutMaker;
+
+  // Create depth memblock/buffer
+  dkImageLayoutMakerDefaults(&layoutMaker, g_device);
+  layoutMaker.flags = DkImageFlags_UsageRender | DkImageFlags_HwCompression;
+  layoutMaker.format = DkImageFormat_Z24S8;
+  layoutMaker.dimensions[0] = FB_WIDTH;
+  layoutMaker.dimensions[1] = FB_HEIGHT;
+
+  DkImageLayout depthLayout;
+  dkImageLayoutInitialize(&depthLayout, &layoutMaker);
+
+  uint32_t depthSize = dkImageLayoutGetSize(&depthLayout);
+  uint32_t depthAlign = dkImageLayoutGetAlignment(&depthLayout);
+  depthSize = align(depthSize, depthAlign);
+
+  dkMemBlockMakerDefaults(&memBlockMaker, g_device, depthSize);
+  memBlockMaker.flags = DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
+  bd->g_depthMemBlock = dkMemBlockCreate(&memBlockMaker);
+
+  dkImageInitialize(&bd->g_depthbuffer, &depthLayout, bd->g_depthMemBlock, 0);
+
+  // Create framebuffer memblock/buffer
+  dkImageLayoutMakerDefaults(&layoutMaker, g_device);
+  layoutMaker.flags = DkImageFlags_UsageRender | DkImageFlags_UsagePresent |
+                      DkImageFlags_HwCompression;
+  layoutMaker.format = DkImageFormat_RGBA8_Unorm;
+  layoutMaker.dimensions[0] = FB_WIDTH;
+  layoutMaker.dimensions[1] = FB_HEIGHT;
+
+  DkImageLayout fbLayout;
+  dkImageLayoutInitialize(&fbLayout, &layoutMaker);
+
+  uint32_t fbSize = dkImageLayoutGetSize(&fbLayout);
+  uint32_t fbAlign = dkImageLayoutGetAlignment(&fbLayout);
+  fbSize = align(fbSize, fbAlign);
+
+  dkMemBlockMakerDefaults(&memBlockMaker, g_device, FB_NUM * fbSize);
+  memBlockMaker.flags = DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
+  bd->g_framebufferMemBlock = dkMemBlockCreate(&memBlockMaker);
+
+  DkImage const *swapchainImages[FB_NUM];
+  for (unsigned i = 0; i < FB_NUM; i++) {
+    swapchainImages[i] = &bd->g_framebuffers[i];
+    dkImageInitialize(&bd->g_framebuffers[i], &fbLayout,
+                      bd->g_framebufferMemBlock, i * fbSize);
+  }
+
+  // Create a swapchain out of the framebuffers we've just initialized
+  DkSwapchainMaker swapchainMaker;
+  dkSwapchainMakerDefaults(&swapchainMaker, g_device, nwindowGetDefault(),
+                           swapchainImages, FB_NUM);
+  bd->g_swapchain = dkSwapchainCreate(&swapchainMaker);
 }
 
 static void InitDeko3dData(ImGui_ImplDeko3d_Data *bd) {
@@ -81,58 +164,11 @@ static void InitDeko3dData(ImGui_ImplDeko3d_Data *bd) {
   dkDeviceMakerDefaults(&deviceMaker);
   DkDevice g_device = bd->g_device = dkDeviceCreate(&deviceMaker);
 
-  // Calculate layout for the framebuffers
-  DkImageLayoutMaker imageLayoutMaker;
-  dkImageLayoutMakerDefaults(&imageLayoutMaker, g_device);
-  imageLayoutMaker.flags = DkImageFlags_UsageRender |
-                           DkImageFlags_UsagePresent |
-                           DkImageFlags_HwCompression;
-  imageLayoutMaker.format = DkImageFormat_RGBA8_Unorm;
-  imageLayoutMaker.dimensions[0] = FB_WIDTH;
-  imageLayoutMaker.dimensions[1] = FB_HEIGHT;
+  InitDeko3Shaders(bd);
 
-  // Calculate layout for the framebuffers
-  DkImageLayout framebufferLayout;
-  dkImageLayoutInitialize(&framebufferLayout, &imageLayoutMaker);
+  InitDeko3dSwapchain(bd);
 
-  // Retrieve necessary size and alignment for the framebuffers
-  uint32_t framebufferSize = dkImageLayoutGetSize(&framebufferLayout);
-  uint32_t framebufferAlign = dkImageLayoutGetAlignment(&framebufferLayout);
-  framebufferSize =
-      (framebufferSize + framebufferAlign - 1) & ~(framebufferAlign - 1);
-
-  // Create a memory block that will host the framebuffers
   DkMemBlockMaker memBlockMaker;
-  dkMemBlockMakerDefaults(&memBlockMaker, g_device, FB_NUM * framebufferSize);
-  memBlockMaker.flags = DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
-  bd->g_framebufferMemBlock = dkMemBlockCreate(&memBlockMaker);
-
-  // Initialize the framebuffers with the layout and backing memory
-  DkImage const *swapchainImages[FB_NUM];
-  for (unsigned i = 0; i < FB_NUM; i++) {
-    swapchainImages[i] = &bd->g_framebuffers[i];
-    dkImageInitialize(&bd->g_framebuffers[i], &framebufferLayout,
-                      bd->g_framebufferMemBlock, i * framebufferSize);
-  }
-
-  // Create a swapchain out of the framebuffers we've just initialized
-  DkSwapchainMaker swapchainMaker;
-  dkSwapchainMakerDefaults(&swapchainMaker, g_device, nwindowGetDefault(),
-                           swapchainImages, FB_NUM);
-  bd->g_swapchain = dkSwapchainCreate(&swapchainMaker);
-
-  // Create a memory block onto which we will load shader code
-  dkMemBlockMakerDefaults(&memBlockMaker, g_device, CODEMEMSIZE);
-  memBlockMaker.flags = DkMemBlockFlags_CpuUncached |
-                        DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code;
-  bd->g_codeMemBlock = dkMemBlockCreate(&memBlockMaker);
-  bd->g_codeMemOffset = 0;
-
-  // Load our shaders (both vertex and fragment)
-  loadShader(&bd->g_vertexShader, "romfs:/shaders/triangle_vsh.dksh",
-             bd->g_codeMemBlock, bd->g_codeMemOffset);
-  loadShader(&bd->g_fragmentShader, "romfs:/shaders/color_fsh.dksh",
-             bd->g_codeMemBlock, bd->g_codeMemOffset);
 
   // Create a memory block for recording command lists
   dkMemBlockMakerDefaults(&memBlockMaker, g_device, CMDMEMSIZE);
@@ -142,7 +178,7 @@ static void InitDeko3dData(ImGui_ImplDeko3d_Data *bd) {
   // Create a command buffer object
   DkCmdBufMaker cmdbufMaker;
   dkCmdBufMakerDefaults(&cmdbufMaker, g_device);
-  DkCmdBuf &g_cmdbuf = bd->g_cmdbuf = dkCmdBufCreate(&cmdbufMaker);
+  DkCmdBuf g_cmdbuf = bd->g_cmdbuf = dkCmdBufCreate(&cmdbufMaker);
 
   // Feed our memory to the command buffer
   dkCmdBufAddMemory(g_cmdbuf, bd->g_cmdbufMemBlock, 0, CMDMEMSIZE);
@@ -189,6 +225,24 @@ static void InitDeko3dData(ImGui_ImplDeko3d_Data *bd) {
   queueMaker.flags = DkQueueFlags_Graphics;
   bd->g_renderQueue = dkQueueCreate(&queueMaker);
 
+  // Create a memory block for UBO
+  dkMemBlockMakerDefaults(&memBlockMaker, g_device, UBOMEMSIZE);
+  memBlockMaker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+  bd->g_uboMemBlock = dkMemBlockCreate(&memBlockMaker);
+
+  // Create memblock for vertex/index data for each frame
+  for (int i = 0; i < FB_NUM; ++i) {
+    dkMemBlockMakerDefaults(&memBlockMaker, g_device, VTXMEMSIZE);
+    memBlockMaker.flags =
+        DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+    bd->g_vtxMemBlock[i] = dkMemBlockCreate(&memBlockMaker);
+
+    dkMemBlockMakerDefaults(&memBlockMaker, g_device, IDXMEMSIZE);
+    memBlockMaker.flags =
+        DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+    bd->g_idxMemBlock[i] = dkMemBlockCreate(&memBlockMaker);
+  }
+
   // Initialize the default gamepad
   padConfigureInput(1, HidNpadStyleSet_NpadStandard);
   padInitializeDefault(&bd->pad);
@@ -202,8 +256,14 @@ static void DestroyDeko3dData(ImGui_ImplDeko3d_Data *bd) {
   dkCmdBufDestroy(bd->g_cmdbuf);
   dkMemBlockDestroy(bd->g_cmdbufMemBlock);
   dkMemBlockDestroy(bd->g_codeMemBlock);
+  dkMemBlockDestroy(bd->g_uboMemBlock);
+  for (int i = 0; i < FB_NUM; ++i) {
+    dkMemBlockDestroy(bd->g_vtxMemBlock[i]);
+    dkMemBlockDestroy(bd->g_idxMemBlock[i]);
+  }
   dkSwapchainDestroy(bd->g_swapchain);
   dkMemBlockDestroy(bd->g_framebufferMemBlock);
+  dkMemBlockDestroy(bd->g_depthMemBlock);
   dkDeviceDestroy(bd->g_device);
 }
 
@@ -243,9 +303,11 @@ bool ImGui_ImplDeko3d_Init() {
 
   ImGui_LoadSwitchFonts(io);
 
+  io.BackendRendererName = "imgui_impl_deko3d";
   io.ConfigFlags |= ImGuiConfigFlags_IsTouchScreen;
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
   io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+  io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
   io.MouseDrawCursor = false;
 
   io.DisplaySize = ImVec2(FB_WIDTH, FB_HEIGHT);
@@ -253,8 +315,6 @@ bool ImGui_ImplDeko3d_Init() {
 
   ImGui_ImplDeko3d_Data *bd = new ImGui_ImplDeko3d_Data();
   io.BackendRendererUserData = (void *)bd;
-  io.BackendRendererName = "imgui_impl_deko3d";
-
   InitDeko3dData(bd);
   return true;
 }
@@ -310,7 +370,7 @@ uint64_t ImGui_ImplDeko3d_UpdatePad() {
       {ImGuiKey_GamepadLStickDown, HidNpadButton_StickLDown},
   };
 
-  for (int i = 0; i < sizeof(mapping) / sizeof(mapping[0]); ++i) {
+  for (int i = 0; i < IM_ARRAYSIZE(mapping); ++i) {
     int im_k = mapping[i][0], nx_k = mapping[i][1];
     if (down & nx_k)
       io.AddKeyEvent(im_k, true);
@@ -322,6 +382,8 @@ uint64_t ImGui_ImplDeko3d_UpdatePad() {
 }
 
 void ImGui_ImplDeko3d_NewFrame() {
+  ImGuiIO &io = ImGui::GetIO();
+  io.DisplaySize = ImVec2(FB_WIDTH, FB_HEIGHT);
   // io.DeltaTime = 1.0f / 60.0f; // TODO
 }
 

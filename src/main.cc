@@ -1,6 +1,8 @@
-#include "imgui_impl_deko3d.h"
+#include <cstdlib>
 #include <imgui.h>
 #include <switch.h>
+
+#include "imgui_impl_deko3d.h"
 
 extern "C" void userAppInit() {
   setsysInitialize();
@@ -20,6 +22,21 @@ extern "C" void userAppExit() {
   socketExit();
 #endif
 }
+
+#define STRINGIFY(x) STRINGIFY_(x)
+#define STRINGIFY_(x) #x
+#define FILELINE __FILE__ ":" STRINGIFY(__LINE__) ": "
+#define CHECK(expr)                                                            \
+  do {                                                                         \
+    bool result = expr;                                                        \
+    if (!result) {                                                             \
+      ErrorApplicationConfig c;                                                \
+      errorApplicationCreate(&c, "Assertion failed in " FILELINE #expr, 0);    \
+      errorApplicationSetNumber(&c, result);                                   \
+      errorApplicationShow(&c);                                                \
+      exit(1);                                                                 \
+    }                                                                          \
+  } while (0)
 
 int main(int argc, char *argv[]) {
   // Setup Dear ImGui
