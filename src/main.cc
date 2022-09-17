@@ -4,9 +4,9 @@
 #include <switch.h>
 
 #include "imgui_impl_deko3d.h"
+#include "util.h"
 
 extern "C" void userAppInit() {
-  setsysInitialize();
   plInitialize(PlServiceType_User);
   romfsInit();
 #ifdef DEBUG
@@ -16,7 +16,6 @@ extern "C" void userAppInit() {
 }
 
 extern "C" void userAppExit() {
-  setsysExit();
   plExit();
   romfsExit();
 #ifdef DEBUG

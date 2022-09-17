@@ -4,7 +4,6 @@ include(/opt/devkitpro/cmake/Switch.cmake)
 project(imgui_deko3d_example VERSION 0.0.1 LANGUAGES C CXX)
 set(PROJECT_AUTHOR "scturtle")
 
-# FIXME: problem with -DNDEBUG
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug CACHE STRING "" FORCE)
 endif()
@@ -22,7 +21,6 @@ add_executable(${TARGET}
   ${IMGUI_DIR}/imgui_widgets.cpp
   )
 target_compile_features(${TARGET} PUBLIC cxx_std_17)
-target_compile_options(${TARGET} PUBLIC -O2)
 
 target_link_libraries(${TARGET} PUBLIC
   $<IF:$<CONFIG:Debug>,deko3dd,deko3d>

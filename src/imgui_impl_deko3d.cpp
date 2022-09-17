@@ -1,4 +1,5 @@
 #include "imgui_impl_deko3d.h"
+#include "util.h"
 
 #include <deko3d.hpp>
 #include <stdio.h>
@@ -26,10 +27,11 @@ struct FragUBO {
 
 struct ImGui_ImplDeko3d_Data {
   dk::UniqueDevice g_device;
+  dk::UniqueQueue g_queue;
 
   dk::UniqueMemBlock g_fbMemBlock;
   dk::Image g_framebuffers[FB_NUM];
-  dk::Swapchain g_swapchain;
+  dk::UniqueSwapchain g_swapchain;
 
   dk::UniqueMemBlock g_depthMemBlock;
   dk::Image g_depthbuffer;
@@ -53,8 +55,6 @@ struct ImGui_ImplDeko3d_Data {
 
   dk::UniqueMemBlock g_cmdbufMemBlock[FB_NUM];
   dk::UniqueCmdBuf g_cmdbuf[FB_NUM];
-
-  dk::UniqueQueue g_queue;
 
   PadState pad;
   u64 last_tick = armGetSystemTick();
@@ -167,22 +167,19 @@ static void InitDeko3dSwapchain(ImGui_ImplDeko3d_Data *bd) {
     bd->g_cmdbuf[i] = dk::CmdBufMaker(g_device).create();
     bd->g_cmdbuf[i].addMemory(bd->g_cmdbufMemBlock[i], 0, CMDMEMSIZE);
   }
-
-  // create a queue
-  bd->g_queue =
-      dk::QueueMaker(g_device).setFlags(DkQueueFlags_Graphics).create();
 }
 
 static void ImGui_LoadSwitchFonts(ImGuiIO &io) {
   PlFontData standard, extended, chinese, korean;
   ImWchar extended_range[] = {0xe000, 0xe152};
-  IM_ASSERT(
-      R_SUCCEEDED(plGetSharedFontByType(&standard, PlSharedFontType_Standard)));
-  IM_ASSERT(R_SUCCEEDED(
-      plGetSharedFontByType(&extended, PlSharedFontType_NintendoExt)));
-  IM_ASSERT(R_SUCCEEDED(
-      plGetSharedFontByType(&chinese, PlSharedFontType_ChineseSimplified)));
-  IM_ASSERT(R_SUCCEEDED(plGetSharedFontByType(&korean, PlSharedFontType_KO)));
+  bool ok = R_SUCCEEDED(
+                plGetSharedFontByType(&standard, PlSharedFontType_Standard)) &&
+            R_SUCCEEDED(plGetSharedFontByType(&extended,
+                                              PlSharedFontType_NintendoExt)) &&
+            R_SUCCEEDED(plGetSharedFontByType(
+                &chinese, PlSharedFontType_ChineseSimplified)) &&
+            R_SUCCEEDED(plGetSharedFontByType(&korean, PlSharedFontType_KO));
+  IM_ASSERT(ok);
 
   ImFontConfig font_cfg;
   font_cfg.FontDataOwnedByAtlas = false;
@@ -192,18 +189,21 @@ static void ImGui_LoadSwitchFonts(ImGuiIO &io) {
   io.Fonts->AddFontFromMemoryTTF(extended.address, extended.size, 18.0f,
                                  &font_cfg, extended_range);
   // NOTE: uncomment to enable Chinese/Korean support but with slow startup time
-  // io.Fonts->AddFontFromMemoryTTF(
-  //     chinese.address, chinese.size, 18.0f, &font_cfg,
-  //     io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
-  // io.Fonts->AddFontFromMemoryTTF(korean.address, korean.size, 18.0f, &font_cfg,
-  //                                io.Fonts->GetGlyphRangesKorean());
+  /*
+  io.Fonts->AddFontFromMemoryTTF(
+      chinese.address, chinese.size, 18.0f, &font_cfg,
+      io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+  io.Fonts->AddFontFromMemoryTTF(korean.address, korean.size, 18.0f, &font_cfg,
+                                 io.Fonts->GetGlyphRangesKorean());
+  */
 
   unsigned char *px;
   int w, h;
   io.Fonts->GetTexDataAsAlpha8(&px, &w, &h);
   io.Fonts->Flags |= ImFontAtlasFlags_NoPowerOfTwoHeight;
   io.Fonts->Build();
-  IM_ASSERT(io.Fonts->IsBuilt());
+  ok = io.Fonts->IsBuilt();
+  IM_ASSERT(ok);
 }
 
 static void InitDeko3dFontTexture(ImGui_ImplDeko3d_Data *bd) {
@@ -277,6 +277,8 @@ static void InitDeko3dFontTexture(ImGui_ImplDeko3d_Data *bd) {
 
 static void InitDeko3dData(ImGui_ImplDeko3d_Data *bd) {
   bd->g_device = dk::DeviceMaker().create();
+  bd->g_queue =
+      dk::QueueMaker(bd->g_device).setFlags(DkQueueFlags_Graphics).create();
 
   InitDeko3Shaders(bd);
 
