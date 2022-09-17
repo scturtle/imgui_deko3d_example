@@ -191,11 +191,12 @@ static void ImGui_LoadSwitchFonts(ImGuiIO &io) {
   font_cfg.MergeMode = true;
   io.Fonts->AddFontFromMemoryTTF(extended.address, extended.size, 18.0f,
                                  &font_cfg, extended_range);
-  io.Fonts->AddFontFromMemoryTTF(
-      chinese.address, chinese.size, 18.0f, &font_cfg,
-      io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
-  io.Fonts->AddFontFromMemoryTTF(korean.address, korean.size, 18.0f, &font_cfg,
-                                 io.Fonts->GetGlyphRangesKorean());
+  // NOTE: uncomment to enable Chinese/Korean support but with slow startup time
+  // io.Fonts->AddFontFromMemoryTTF(
+  //     chinese.address, chinese.size, 18.0f, &font_cfg,
+  //     io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+  // io.Fonts->AddFontFromMemoryTTF(korean.address, korean.size, 18.0f, &font_cfg,
+  //                                io.Fonts->GetGlyphRangesKorean());
 
   unsigned char *px;
   int w, h;
