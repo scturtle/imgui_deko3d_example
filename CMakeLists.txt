@@ -20,9 +20,11 @@ add_executable(${TARGET}
   ${IMGUI_DIR}/imgui_tables.cpp
   ${IMGUI_DIR}/imgui_widgets.cpp
   )
+target_compile_features(${TARGET} PUBLIC cxx_std_17)
 
 target_link_libraries(${TARGET} PUBLIC
-  deko3dd)
+  $<IF:$<CONFIG:Debug>,deko3dd,deko3d>
+  )
 target_include_directories(${TARGET} PUBLIC
   ${DEVKITPRO}/portlibs/switch/include
   ${IMGUI_DIR})
