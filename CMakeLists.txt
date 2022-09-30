@@ -21,6 +21,10 @@ add_executable(${TARGET}
   ${IMGUI_DIR}/imgui_widgets.cpp
   )
 target_compile_features(${TARGET} PUBLIC cxx_std_17)
+target_compile_definitions(${TARGET} PUBLIC
+  IMGUI_DISABLE_OBSOLETE_KEYIO
+  IMGUI_DISABLE_OBSOLETE_FUNCTIONS
+  )
 
 target_link_libraries(${TARGET} PUBLIC
   $<IF:$<CONFIG:Debug>,deko3dd,deko3d>

@@ -39,8 +39,8 @@ int main(int argc, char *argv[]) {
     ImGui_ImplDeko3d_NewFrame();
     ImGui::NewFrame();
 
-    bool done;
-    ImGui::ShowDemoWindow(&done);
+    bool open;
+    ImGui::ShowDemoWindow(&open);
 
     ImGui::Render();
     ImGui_ImplDeko3d_RenderDrawData(ImGui::GetDrawData());

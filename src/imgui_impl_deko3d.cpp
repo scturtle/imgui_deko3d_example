@@ -1,60 +1,52 @@
 #include "imgui_impl_deko3d.h"
-#include "util.h"
 
 #include <deko3d.hpp>
 #include <stdio.h>
-#include <stdlib.h>
 #include <switch.h>
 
-#define GLM_FORCE_DEFAULT_ALIGNED_GENTYPES
-#define GLM_FORCE_INTRINSICS
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/mat4x4.hpp>
-
-struct VertUBO {
-  glm::mat4 projMtx;
-};
-struct FragUBO {
-  std::uint32_t font;
-};
 
 #define FB_NUM 2
 #define FB_WIDTH 1280
 #define FB_HEIGHT 720
 #define CODEMEMSIZE (4 * 1024)
 #define CMDMEMSIZE (16 * 1024)
-#define MAX_TEXTURES 1
+
+struct VertUBO {
+  glm::mat4 proj;
+};
+
+struct Descriptors {
+  dk::SamplerDescriptor sampler;
+  dk::ImageDescriptor image;
+};
 
 struct ImGui_ImplDeko3d_Data {
-  dk::UniqueDevice g_device;
-  dk::UniqueQueue g_queue;
+  dk::UniqueDevice device;
+  dk::UniqueQueue queue;
 
-  dk::UniqueMemBlock g_fbMemBlock;
-  dk::Image g_framebuffers[FB_NUM];
-  dk::UniqueSwapchain g_swapchain;
+  dk::UniqueMemBlock fbMemBlock;
+  dk::Image framebuffers[FB_NUM];
+  dk::UniqueSwapchain swapchain;
 
-  dk::UniqueMemBlock g_depthMemBlock;
-  dk::Image g_depthbuffer;
+  dk::UniqueMemBlock depthMemBlock;
+  dk::Image depthbuffer;
 
-  dk::UniqueMemBlock g_codeMemBlock;
-  dk::Shader g_vertexShader;
-  dk::Shader g_fragmentShader;
+  dk::UniqueMemBlock codeMemBlock;
+  dk::Shader vertexShader;
+  dk::Shader fragmentShader;
 
-  dk::UniqueMemBlock g_uboMemBlock;
-  dk::UniqueMemBlock g_vtxMemBlock[FB_NUM];
-  dk::UniqueMemBlock g_idxMemBlock[FB_NUM];
+  dk::UniqueMemBlock uboMemBlock;
+  dk::UniqueMemBlock vtxMemBlock[FB_NUM];
+  dk::UniqueMemBlock idxMemBlock[FB_NUM];
 
-  dk::UniqueMemBlock g_descriptorsMemBlock;
-  struct {
-    dk::SamplerDescriptor sampler[MAX_TEXTURES];
-    dk::ImageDescriptor image[MAX_TEXTURES];
-  } *g_descriptors = nullptr;
+  dk::UniqueMemBlock descriptorsMemBlock;
+  dk::UniqueMemBlock fontImageMemBlock;
+  DkResHandle fontTextureHandle;
 
-  dk::UniqueMemBlock g_fontImageMemBlock;
-  DkResHandle g_fontTextureHandle;
-
-  dk::UniqueMemBlock g_cmdbufMemBlock[FB_NUM];
-  dk::UniqueCmdBuf g_cmdbuf[FB_NUM];
+  dk::UniqueMemBlock cmdbufMemBlock[FB_NUM];
+  dk::UniqueCmdBuf cmdbuf[FB_NUM];
 
   PadState pad;
   u64 last_tick = armGetSystemTick();
@@ -71,66 +63,63 @@ static constexpr u32 align(u32 size, u32 align) {
 }
 
 static u32 loadShader(dk::Shader &shader, const char *path,
-                      DkMemBlock g_codeMemBlock, u32 codeOffset) {
+                      DkMemBlock codeMemBlock, u32 codeOffset) {
   FILE *f = fopen(path, "rb");
   fseek(f, 0, SEEK_END);
   u32 size = ftell(f);
   rewind(f);
-  fread((char *)dkMemBlockGetCpuAddr(g_codeMemBlock) + codeOffset, size, 1, f);
+  fread((char *)dkMemBlockGetCpuAddr(codeMemBlock) + codeOffset, size, 1, f);
   fclose(f);
   // init sahder
-  dk::ShaderMaker(g_codeMemBlock, codeOffset).initialize(shader);
+  dk::ShaderMaker(codeMemBlock, codeOffset).initialize(shader);
   return align(size, DK_SHADER_CODE_ALIGNMENT);
 }
 
 static void InitDeko3Shaders(ImGui_ImplDeko3d_Data *bd) {
-  DkDevice g_device = bd->g_device;
+  DkDevice device = bd->device;
   // create memory block for shader code
   static_assert(CODEMEMSIZE == align(CODEMEMSIZE, DK_MEMBLOCK_ALIGNMENT), "");
-  bd->g_codeMemBlock =
-      dk::MemBlockMaker(g_device, CODEMEMSIZE)
+  bd->codeMemBlock =
+      dk::MemBlockMaker(device, CODEMEMSIZE)
           .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached |
                     DkMemBlockFlags_Code)
           .create();
 
   // load shaders
   u32 codeMemOffset = 0;
+  codeMemOffset += loadShader(bd->vertexShader, "romfs:/shaders/imgui_vsh.dksh",
+                              bd->codeMemBlock, codeMemOffset);
   codeMemOffset +=
-      loadShader(bd->g_vertexShader, "romfs:/shaders/imgui_vsh.dksh",
-                 bd->g_codeMemBlock, codeMemOffset);
-  codeMemOffset +=
-      loadShader(bd->g_fragmentShader, "romfs:/shaders/imgui_fsh.dksh",
-                 bd->g_codeMemBlock, codeMemOffset);
+      loadShader(bd->fragmentShader, "romfs:/shaders/imgui_fsh.dksh",
+                 bd->codeMemBlock, codeMemOffset);
   IM_ASSERT(codeMemOffset + DK_SHADER_CODE_UNUSABLE_SIZE <= CODEMEMSIZE);
 }
 
 static void InitDeko3dSwapchain(ImGui_ImplDeko3d_Data *bd) {
-  DkDevice g_device = bd->g_device;
+  DkDevice device = bd->device;
 
   // create depth layout
   dk::ImageLayout depthLayout;
-  dk::ImageLayoutMaker(g_device)
+  dk::ImageLayoutMaker(device)
       .setFlags(DkImageFlags_UsageRender | DkImageFlags_HwCompression)
       .setFormat(DkImageFormat_Z24S8)
       .setDimensions(FB_WIDTH, FB_HEIGHT)
       .initialize(depthLayout);
 
-  u32 depthSize =
-      align(align(depthLayout.getSize(), depthLayout.getAlignment()),
-            (u32)DK_MEMBLOCK_ALIGNMENT);
-
   // create depth memblock
-  bd->g_depthMemBlock =
-      dk::MemBlockMaker(g_device, depthSize)
+  bd->depthMemBlock =
+      dk::MemBlockMaker(device, align(align(depthLayout.getSize(),
+                                            depthLayout.getAlignment()),
+                                      (u32)DK_MEMBLOCK_ALIGNMENT))
           .setFlags(DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image)
           .create();
 
   // create depth image
-  bd->g_depthbuffer.initialize(depthLayout, bd->g_depthMemBlock, 0);
+  bd->depthbuffer.initialize(depthLayout, bd->depthMemBlock, 0);
 
   // create framebuffer layout
   dk::ImageLayout fbLayout;
-  dk::ImageLayoutMaker(g_device)
+  dk::ImageLayoutMaker(device)
       .setFlags(DkImageFlags_UsageRender | DkImageFlags_UsagePresent |
                 DkImageFlags_HwCompression)
       .setFormat(DkImageFormat_RGBA8_Unorm)
@@ -141,31 +130,30 @@ static void InitDeko3dSwapchain(ImGui_ImplDeko3d_Data *bd) {
                      (u32)DK_MEMBLOCK_ALIGNMENT);
 
   // create framebuffer memblock
-  bd->g_fbMemBlock =
-      dk::MemBlockMaker(g_device, FB_NUM * fbSize)
+  bd->fbMemBlock =
+      dk::MemBlockMaker(device, FB_NUM * fbSize)
           .setFlags(DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image)
           .create();
 
   // create framebuffer images
   std::array<DkImage const *, FB_NUM> swapchainImages;
   for (unsigned i = 0; i < FB_NUM; i++) {
-    swapchainImages[i] = &bd->g_framebuffers[i];
-    bd->g_framebuffers[i].initialize(fbLayout, bd->g_fbMemBlock, i * fbSize);
+    swapchainImages[i] = &bd->framebuffers[i];
+    bd->framebuffers[i].initialize(fbLayout, bd->fbMemBlock, i * fbSize);
   }
 
   // create a swapchain
-  bd->g_swapchain =
-      dk::SwapchainMaker(g_device, nwindowGetDefault(), swapchainImages)
-          .create();
+  bd->swapchain =
+      dk::SwapchainMaker(device, nwindowGetDefault(), swapchainImages).create();
 
   // Create command buffer and memory block
   for (int i = 0; i < FB_NUM; ++i) {
-    bd->g_cmdbufMemBlock[i] =
-        dk::MemBlockMaker(g_device, align(CMDMEMSIZE, DK_MEMBLOCK_ALIGNMENT))
+    bd->cmdbufMemBlock[i] =
+        dk::MemBlockMaker(device, align(CMDMEMSIZE, DK_MEMBLOCK_ALIGNMENT))
             .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
             .create();
-    bd->g_cmdbuf[i] = dk::CmdBufMaker(g_device).create();
-    bd->g_cmdbuf[i].addMemory(bd->g_cmdbufMemBlock[i], 0, CMDMEMSIZE);
+    bd->cmdbuf[i] = dk::CmdBufMaker(device).create();
+    bd->cmdbuf[i].addMemory(bd->cmdbufMemBlock[i], 0, CMDMEMSIZE);
   }
 }
 
@@ -197,71 +185,66 @@ static void ImGui_LoadSwitchFonts(ImGuiIO &io) {
                                  io.Fonts->GetGlyphRangesKorean());
   */
 
-  unsigned char *px;
-  int w, h;
-  io.Fonts->GetTexDataAsAlpha8(&px, &w, &h);
   io.Fonts->Flags |= ImFontAtlasFlags_NoPowerOfTwoHeight;
   io.Fonts->Build();
-  ok = io.Fonts->IsBuilt();
-  IM_ASSERT(ok);
 }
 
 static void InitDeko3dFontTexture(ImGui_ImplDeko3d_Data *bd) {
-  DkDevice g_device = bd->g_device;
-  dk::CmdBuf cmdbuf = bd->g_cmdbuf[0];
+  DkDevice device = bd->device;
+  dk::CmdBuf cmdbuf = bd->cmdbuf[0];
 
-  // initialize all descriptors
-  bd->g_descriptorsMemBlock =
-      dk::MemBlockMaker(
-          g_device, align(sizeof(*bd->g_descriptors), DK_MEMBLOCK_ALIGNMENT))
+  // initialize memblock for descriptors
+  bd->descriptorsMemBlock =
+      dk::MemBlockMaker(device,
+                        align(sizeof(Descriptors), DK_MEMBLOCK_ALIGNMENT))
           .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
           .create();
-  const void *descCpuAddr = bd->g_descriptorsMemBlock.getCpuAddr();
-  const DkGpuAddr descGpuAddr = bd->g_descriptorsMemBlock.getGpuAddr();
-  bd->g_descriptors = (__typeof__(bd->g_descriptors))descCpuAddr;
+  Descriptors *descCpuAddr =
+      (Descriptors *)bd->descriptorsMemBlock.getCpuAddr();
+  DkGpuAddr descGpuAddr = bd->descriptorsMemBlock.getGpuAddr();
 
   // bind all descriptors
-  cmdbuf.bindSamplerDescriptorSet(descGpuAddr, MAX_TEXTURES);
-  constexpr int offset = offsetof(__typeof__(*bd->g_descriptors), image);
-  cmdbuf.bindImageDescriptorSet(descGpuAddr + offset, MAX_TEXTURES);
+  cmdbuf.bindSamplerDescriptorSet(descGpuAddr, 1);
+  constexpr int offset = offsetof(Descriptors, image);
+  cmdbuf.bindImageDescriptorSet(descGpuAddr + offset, 1);
 
   // generate font texture id
   ImGuiIO &io = ImGui::GetIO();
   ImGui_LoadSwitchFonts(io);
-  bd->g_fontTextureHandle = dkMakeTextureHandle(0, 0);
-  // record font texture id
-  io.Fonts->SetTexID(&bd->g_fontTextureHandle);
+  bd->fontTextureHandle = dkMakeTextureHandle(0, 0);
+  io.Fonts->SetTexID(&bd->fontTextureHandle);
 
   // copy font data to scratch buffer
   unsigned char *pixels;
-  int font_width, font_height;
-  io.Fonts->GetTexDataAsAlpha8(&pixels, &font_width, &font_height);
+  int width, height, channel;
+  io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height, &channel);
   dk::UniqueMemBlock scratchMemBlock =
-      dk::MemBlockMaker(g_device,
-                        align(font_width * font_height, DK_MEMBLOCK_ALIGNMENT))
+      dk::MemBlockMaker(device,
+                        align(width * height * channel, DK_MEMBLOCK_ALIGNMENT))
           .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
           .create();
-  memcpy(scratchMemBlock.getCpuAddr(), pixels, font_width * font_height);
+  memcpy(scratchMemBlock.getCpuAddr(), pixels, width * height * channel);
 
   // create font image memblock
   dk::ImageLayout layout;
-  dk::ImageLayoutMaker{g_device}
+  dk::ImageLayoutMaker{device}
       .setFlags(0)
-      .setFormat(DkImageFormat_R8_Unorm)
-      .setDimensions(font_width, font_height)
+      .setFormat(DkImageFormat_RGBA8_Unorm)
+      .setDimensions(width, height)
       .initialize(layout);
-  bd->g_fontImageMemBlock =
-      dk::MemBlockMaker{g_device, align(layout.getSize(),
-                                        std::max(layout.getAlignment(),
-                                                 (u32)DK_MEMBLOCK_ALIGNMENT))}
+  bd->fontImageMemBlock =
+      dk::MemBlockMaker{
+          device, align(layout.getSize(), std::max(layout.getAlignment(),
+                                                   (u32)DK_MEMBLOCK_ALIGNMENT))}
           .setFlags(DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image)
           .create();
+
   dk::Image fontImage;
-  fontImage.initialize(layout, bd->g_fontImageMemBlock, 0);
+  fontImage.initialize(layout, bd->fontImageMemBlock, 0);
 
   // init font descriptors
-  bd->g_descriptors->image[0].initialize(fontImage);
-  bd->g_descriptors->sampler[0].initialize(
+  descCpuAddr->image.initialize(fontImage);
+  descCpuAddr->sampler.initialize(
       dk::Sampler{}
           .setFilter(DkFilter_Linear, DkFilter_Linear)
           .setWrapMode(DkWrapMode_ClampToEdge, DkWrapMode_ClampToEdge,
@@ -270,15 +253,16 @@ static void InitDeko3dFontTexture(ImGui_ImplDeko3d_Data *bd) {
   // copy from scratch buffer to font image
   cmdbuf.copyBufferToImage({scratchMemBlock.getGpuAddr()},
                            dk::ImageView{fontImage},
-                           {0, 0, 0, u32(font_width), u32(font_height), 1});
-  bd->g_queue.submitCommands(cmdbuf.finishList());
-  bd->g_queue.waitIdle();
+                           {0, 0, 0, u32(width), u32(height), 1});
+
+  bd->queue.submitCommands(cmdbuf.finishList());
+  bd->queue.waitIdle();
 }
 
 static void InitDeko3dData(ImGui_ImplDeko3d_Data *bd) {
-  bd->g_device = dk::DeviceMaker().create();
-  bd->g_queue =
-      dk::QueueMaker(bd->g_device).setFlags(DkQueueFlags_Graphics).create();
+  bd->device = dk::DeviceMaker().create();
+  bd->queue =
+      dk::QueueMaker(bd->device).setFlags(DkQueueFlags_Graphics).create();
 
   InitDeko3Shaders(bd);
 
@@ -287,10 +271,10 @@ static void InitDeko3dData(ImGui_ImplDeko3d_Data *bd) {
   InitDeko3dFontTexture(bd);
 
   // Create a memory block for UBO
-  size_t uboSize = align(sizeof(VertUBO), DK_UNIFORM_BUF_ALIGNMENT) +
-                   align(sizeof(FragUBO), DK_UNIFORM_BUF_ALIGNMENT);
-  bd->g_uboMemBlock =
-      dk::MemBlockMaker(bd->g_device, align(uboSize, DK_MEMBLOCK_ALIGNMENT))
+  bd->uboMemBlock =
+      dk::MemBlockMaker(bd->device,
+                        align(align(sizeof(VertUBO), DK_UNIFORM_BUF_ALIGNMENT),
+                              DK_MEMBLOCK_ALIGNMENT))
           .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
           .create();
 }
@@ -322,7 +306,7 @@ void ImGui_ImplDeko3d_Init() {
 
 void ImGui_ImplDeko3d_Shutdown() {
   ImGui_ImplDeko3d_Data *bd = getBackendData();
-  dkQueueWaitIdle(bd->g_queue);
+  dkQueueWaitIdle(bd->queue);
   delete bd;
 }
 
@@ -376,9 +360,9 @@ uint64_t ImGui_ImplDeko3d_UpdatePad() {
   for (int i = 0; i < IM_ARRAYSIZE(mapping); ++i) {
     auto [im_k, nx_k] = mapping[i];
     if (down & nx_k)
-      io.AddKeyEvent(im_k, true);
+      io.AddKeyEvent((ImGuiKey)im_k, true);
     else if (up & nx_k)
-      io.AddKeyEvent(im_k, false);
+      io.AddKeyEvent((ImGuiKey)im_k, false);
   }
   return up;
 }
@@ -394,15 +378,17 @@ void ImGui_ImplDeko3d_NewFrame() {
 
 static void SetupDeko3dRenderState(ImGui_ImplDeko3d_Data *bd, dk::CmdBuf cmdbuf,
                                    int slot) {
-  dk::ImageView imageView(bd->g_framebuffers[slot]);
-  dk::ImageView depthView(bd->g_depthbuffer);
+  ImGuiIO &io = ImGui::GetIO();
+  dk::ImageView imageView(bd->framebuffers[slot]);
+  dk::ImageView depthView(bd->depthbuffer);
   cmdbuf.bindRenderTargets(&imageView, &depthView);
-  cmdbuf.setViewports(0, {{0.0f, 0.0f, FB_WIDTH, FB_HEIGHT}});
-  cmdbuf.setScissors(0, DkScissor{0, 0, FB_WIDTH, FB_HEIGHT});
+  cmdbuf.setViewports(0, {{0.0f, 0.0f, io.DisplaySize.x, io.DisplaySize.y}});
+  cmdbuf.setScissors(
+      0, DkScissor{0, 0, (u32)io.DisplaySize.x, (u32)io.DisplaySize.y});
   cmdbuf.clearColor(0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);
   cmdbuf.clearDepthStencil(true, 1.0f, 0xFF, 0);
   cmdbuf.bindShaders(DkStageFlag_GraphicsMask,
-                     {&bd->g_vertexShader, &bd->g_fragmentShader});
+                     {&bd->vertexShader, &bd->fragmentShader});
   cmdbuf.bindRasterizerState(dk::RasterizerState{}.setCullMode(DkFace_None));
   cmdbuf.bindColorState(dk::ColorState{}.setBlendEnable(0, true));
   cmdbuf.bindColorWriteState(dk::ColorWriteState{});
@@ -411,58 +397,51 @@ static void SetupDeko3dRenderState(ImGui_ImplDeko3d_Data *bd, dk::CmdBuf cmdbuf,
   cmdbuf.bindBlendStates(0, dk::BlendState{});
 
   VertUBO vertUBO;
-  vertUBO.projMtx = glm::orthoRH_ZO(0.0f, (float)FB_WIDTH, (float)FB_HEIGHT,
-                                    0.0f, -1.0f, 1.0f);
-  DkGpuAddr vertUBOGpuAddr = bd->g_uboMemBlock.getGpuAddr();
+  vertUBO.proj = glm::orthoRH_ZO(0.0f, io.DisplaySize.x, io.DisplaySize.y, 0.0f,
+                                 -1.0f, 1.0f);
+  DkGpuAddr vertUBOGpuAddr = bd->uboMemBlock.getGpuAddr();
   size_t vertUBOSize = align(sizeof(vertUBO), DK_UNIFORM_BUF_ALIGNMENT);
   cmdbuf.bindUniformBuffer(DkStage_Vertex, 0, vertUBOGpuAddr, vertUBOSize);
   cmdbuf.pushConstants(vertUBOGpuAddr, vertUBOSize, 0, sizeof(VertUBO),
                        &vertUBO);
-  DkGpuAddr fragUBOGpuAddr = bd->g_uboMemBlock.getGpuAddr() +
-                             align(sizeof(VertUBO), DK_UNIFORM_BUF_ALIGNMENT);
-  size_t fragUBOSize = align(sizeof(FragUBO), DK_UNIFORM_BUF_ALIGNMENT);
-  cmdbuf.bindUniformBuffer(DkStage_Fragment, 0, fragUBOGpuAddr, fragUBOSize);
 
   cmdbuf.bindVtxAttribState({
       // clang-format off
-      DkVtxAttribState{0, 0, IM_OFFSETOF(ImDrawVert, pos), DkVtxAttribSize_2x32, DkVtxAttribType_Float, 0},
-      DkVtxAttribState{0, 0, IM_OFFSETOF(ImDrawVert, uv), DkVtxAttribSize_2x32, DkVtxAttribType_Float, 0},
-      DkVtxAttribState{0, 0, IM_OFFSETOF(ImDrawVert, col), DkVtxAttribSize_4x8, DkVtxAttribType_Unorm, 0},
+      DkVtxAttribState{0, 0, offsetof(ImDrawVert, pos), DkVtxAttribSize_2x32, DkVtxAttribType_Float, 0},
+      DkVtxAttribState{0, 0, offsetof(ImDrawVert, uv), DkVtxAttribSize_2x32, DkVtxAttribType_Float, 0},
+      DkVtxAttribState{0, 0, offsetof(ImDrawVert, col), DkVtxAttribSize_4x8, DkVtxAttribType_Unorm, 0},
       // clang-format on
   });
   cmdbuf.bindVtxBufferState({DkVtxBufferState{sizeof(ImDrawVert), 0}});
-  bd->g_queue.submitCommands(cmdbuf.finishList());
+  bd->queue.submitCommands(cmdbuf.finishList());
 }
 
 void ImGui_ImplDeko3d_RenderDrawData(ImDrawData *drawData) {
   ImGui_ImplDeko3d_Data *bd = getBackendData();
 
   // acquire a framebuffer from the swapchain (and wait for it to be available)
-  int slot = dkQueueAcquireImage(bd->g_queue, bd->g_swapchain);
-  dk::CmdBuf cmdbuf = bd->g_cmdbuf[slot];
+  int slot = dkQueueAcquireImage(bd->queue, bd->swapchain);
+  dk::CmdBuf cmdbuf = bd->cmdbuf[slot];
   cmdbuf.clear();
-
   SetupDeko3dRenderState(bd, cmdbuf, slot);
 
   // init or grow vertex/index buffer if not enough
   size_t totVtxSize = std::max(drawData->TotalVtxCount * sizeof(ImDrawVert),
                                (size_t)DK_MEMBLOCK_ALIGNMENT * 16);
-  if (!bd->g_vtxMemBlock[slot] ||
-      bd->g_vtxMemBlock[slot].getSize() < totVtxSize) {
-    bd->g_vtxMemBlock[slot] = nullptr; // destroy
-    bd->g_vtxMemBlock[slot] =
-        dk::MemBlockMaker(bd->g_device,
+  if (!bd->vtxMemBlock[slot] || bd->vtxMemBlock[slot].getSize() < totVtxSize) {
+    bd->vtxMemBlock[slot] = nullptr; // destroy
+    bd->vtxMemBlock[slot] =
+        dk::MemBlockMaker(bd->device,
                           align(2 * totVtxSize, DK_MEMBLOCK_ALIGNMENT))
             .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
             .create();
   }
   size_t totIdxSize = std::max(drawData->TotalIdxCount * sizeof(ImDrawIdx),
                                (size_t)DK_MEMBLOCK_ALIGNMENT * 16);
-  if (!bd->g_idxMemBlock[slot] ||
-      bd->g_idxMemBlock[slot].getSize() < totIdxSize) {
-    bd->g_idxMemBlock[slot] = nullptr; // destroy
-    bd->g_idxMemBlock[slot] =
-        dk::MemBlockMaker(bd->g_device,
+  if (!bd->idxMemBlock[slot] || bd->idxMemBlock[slot].getSize() < totIdxSize) {
+    bd->idxMemBlock[slot] = nullptr; // destroy
+    bd->idxMemBlock[slot] =
+        dk::MemBlockMaker(bd->device,
                           align(2 * totIdxSize, DK_MEMBLOCK_ALIGNMENT))
             .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
             .create();
@@ -470,10 +449,9 @@ void ImGui_ImplDeko3d_RenderDrawData(ImDrawData *drawData) {
 
   // bind vertex/index buffer
   static_assert(sizeof(ImDrawIdx) == sizeof(uint16_t), "");
-  cmdbuf.bindVtxBuffer(0, bd->g_vtxMemBlock[slot].getGpuAddr(),
-                       bd->g_vtxMemBlock[slot].getSize());
-  cmdbuf.bindIdxBuffer(DkIdxFormat_Uint16,
-                       bd->g_idxMemBlock[slot].getGpuAddr());
+  cmdbuf.bindVtxBuffer(0, bd->vtxMemBlock[slot].getGpuAddr(),
+                       bd->vtxMemBlock[slot].getSize());
+  cmdbuf.bindIdxBuffer(DkIdxFormat_Uint16, bd->idxMemBlock[slot].getGpuAddr());
 
   DkResHandle boundTextureHandle = ~0;
   size_t vtxOffset = 0, idxOffset = 0;
@@ -482,9 +460,9 @@ void ImGui_ImplDeko3d_RenderDrawData(ImDrawData *drawData) {
     size_t vtxSize = cmdList.VtxBuffer.Size * sizeof(ImDrawVert);
     size_t idxSize = cmdList.IdxBuffer.Size * sizeof(ImDrawIdx);
     // copy vertex/index data to buffer
-    memcpy((char *)bd->g_vtxMemBlock[slot].getCpuAddr() + vtxOffset,
+    memcpy((char *)bd->vtxMemBlock[slot].getCpuAddr() + vtxOffset,
            cmdList.VtxBuffer.Data, vtxSize);
-    memcpy((char *)bd->g_idxMemBlock[slot].getCpuAddr() + idxOffset,
+    memcpy((char *)bd->idxMemBlock[slot].getCpuAddr() + idxOffset,
            cmdList.IdxBuffer.Data, idxSize);
 
     for (auto const &cmd : cmdList.CmdBuffer) {
@@ -495,17 +473,10 @@ void ImGui_ImplDeko3d_RenderDrawData(ImDrawData *drawData) {
       DkResHandle textureHandle = *(DkResHandle *)cmd.TextureId;
       // check if we need to bind a new texture
       if (textureHandle != boundTextureHandle) {
-        FragUBO fragUBO;
-        fragUBO.font = (textureHandle == bd->g_fontTextureHandle);
-        cmdbuf.pushConstants(
-            bd->g_uboMemBlock.getGpuAddr() +
-                align(sizeof(VertUBO), DK_UNIFORM_BUF_ALIGNMENT),
-            align(sizeof(FragUBO), DK_UNIFORM_BUF_ALIGNMENT), 0,
-            sizeof(FragUBO), &fragUBO);
         boundTextureHandle = textureHandle;
         cmdbuf.bindTextures(DkStage_Fragment, 0, textureHandle);
       }
-      // draw the draw list
+      // draw the triangle list
       cmdbuf.drawIndexed(DkPrimitive_Triangles, cmd.ElemCount, 1,
                          cmd.IdxOffset + idxOffset / sizeof(ImDrawIdx),
                          cmd.VtxOffset + vtxOffset / sizeof(ImDrawVert), 0);
@@ -517,6 +488,6 @@ void ImGui_ImplDeko3d_RenderDrawData(ImDrawData *drawData) {
   cmdbuf.barrier(DkBarrier_Fragments, 0);
   cmdbuf.discardDepthStencil();
 
-  bd->g_queue.submitCommands(cmdbuf.finishList());
-  bd->g_queue.presentImage(bd->g_swapchain, slot);
+  bd->queue.submitCommands(cmdbuf.finishList());
+  bd->queue.presentImage(bd->swapchain, slot);
 }

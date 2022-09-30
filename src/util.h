@@ -3,6 +3,10 @@
 #include <cstdio>
 #include <switch.h>
 
+namespace ImGui {
+void DebugLog(const char *, ...);
+}
+
 #define MSGBOX(fmt, ...)                                                          \
   do {                                                                         \
     char buf[256];                                                             \
