@@ -11,15 +11,16 @@
 #define FB_WIDTH 1280
 #define FB_HEIGHT 720
 #define CODEMEMSIZE (4 * 1024)
-#define CMDMEMSIZE (16 * 1024)
+#define CMDMEMSIZE (1024 * 1024)
+#define MAX_TEX_NUM 4
 
 struct VertUBO {
   glm::mat4 proj;
 };
 
 struct Descriptors {
-  dk::SamplerDescriptor sampler;
-  dk::ImageDescriptor image;
+  dk::SamplerDescriptor sampler[MAX_TEX_NUM];
+  dk::ImageDescriptor image[MAX_TEX_NUM];
 };
 
 struct ImGui_ImplDeko3d_Data {
@@ -42,8 +43,9 @@ struct ImGui_ImplDeko3d_Data {
   dk::UniqueMemBlock idxMemBlock[FB_NUM];
 
   dk::UniqueMemBlock descriptorsMemBlock;
-  dk::UniqueMemBlock fontImageMemBlock;
-  DkResHandle fontTextureHandle;
+  dk::UniqueMemBlock textureMemBlock[MAX_TEX_NUM];
+  DkResHandle textureHandle[MAX_TEX_NUM];
+  int tex_cnt = 0;
 
   dk::UniqueMemBlock cmdbufMemBlock[FB_NUM];
   dk::UniqueCmdBuf cmdbuf[FB_NUM];
@@ -189,9 +191,10 @@ static void ImGui_LoadSwitchFonts(ImGuiIO &io) {
   io.Fonts->Build();
 }
 
-static void InitDeko3dFontTexture(ImGui_ImplDeko3d_Data *bd) {
+static void InitDeko3dDescriptors(ImGui_ImplDeko3d_Data *bd) {
   DkDevice device = bd->device;
   dk::CmdBuf cmdbuf = bd->cmdbuf[0];
+  cmdbuf.clear();
 
   // initialize memblock for descriptors
   bd->descriptorsMemBlock =
@@ -199,20 +202,29 @@ static void InitDeko3dFontTexture(ImGui_ImplDeko3d_Data *bd) {
                         align(sizeof(Descriptors), DK_MEMBLOCK_ALIGNMENT))
           .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
           .create();
-  Descriptors *descCpuAddr =
-      (Descriptors *)bd->descriptorsMemBlock.getCpuAddr();
-  DkGpuAddr descGpuAddr = bd->descriptorsMemBlock.getGpuAddr();
 
   // bind all descriptors
-  cmdbuf.bindSamplerDescriptorSet(descGpuAddr, 1);
-  constexpr int offset = offsetof(Descriptors, image);
-  cmdbuf.bindImageDescriptorSet(descGpuAddr + offset, 1);
+  DkGpuAddr descGpuAddr = bd->descriptorsMemBlock.getGpuAddr();
+  cmdbuf.bindSamplerDescriptorSet(descGpuAddr, MAX_TEX_NUM);
+  int offset = MAX_TEX_NUM * sizeof(dk::SamplerDescriptor);
+  cmdbuf.bindImageDescriptorSet(descGpuAddr + offset, MAX_TEX_NUM);
+
+  bd->queue.submitCommands(cmdbuf.finishList());
+  bd->queue.waitIdle();
+}
+
+static void InitDeko3dFontTexture(ImGui_ImplDeko3d_Data *bd) {
+  DkDevice device = bd->device;
+  dk::CmdBuf cmdbuf = bd->cmdbuf[0];
+  cmdbuf.clear();
 
   // generate font texture id
   ImGuiIO &io = ImGui::GetIO();
   ImGui_LoadSwitchFonts(io);
-  bd->fontTextureHandle = dkMakeTextureHandle(0, 0);
-  io.Fonts->SetTexID(&bd->fontTextureHandle);
+
+  auto tex_id = bd->tex_cnt++;
+  bd->textureHandle[tex_id] = dkMakeTextureHandle(tex_id, tex_id);
+  io.Fonts->SetTexID(&bd->textureHandle[tex_id]);
 
   // copy font data to scratch buffer
   unsigned char *pixels;
@@ -232,7 +244,7 @@ static void InitDeko3dFontTexture(ImGui_ImplDeko3d_Data *bd) {
       .setFormat(DkImageFormat_RGBA8_Unorm)
       .setDimensions(width, height)
       .initialize(layout);
-  bd->fontImageMemBlock =
+  bd->textureMemBlock[tex_id] =
       dk::MemBlockMaker{
           device, align(layout.getSize(), std::max(layout.getAlignment(),
                                                    (u32)DK_MEMBLOCK_ALIGNMENT))}
@@ -240,11 +252,12 @@ static void InitDeko3dFontTexture(ImGui_ImplDeko3d_Data *bd) {
           .create();
 
   dk::Image fontImage;
-  fontImage.initialize(layout, bd->fontImageMemBlock, 0);
+  fontImage.initialize(layout, bd->textureMemBlock[tex_id], 0);
 
   // init font descriptors
-  descCpuAddr->image.initialize(fontImage);
-  descCpuAddr->sampler.initialize(
+  auto descCpuAddr = (Descriptors *)bd->descriptorsMemBlock.getCpuAddr();
+  descCpuAddr->image[tex_id].initialize(fontImage);
+  descCpuAddr->sampler[tex_id].initialize(
       dk::Sampler{}
           .setFilter(DkFilter_Linear, DkFilter_Linear)
           .setWrapMode(DkWrapMode_ClampToEdge, DkWrapMode_ClampToEdge,
@@ -259,6 +272,60 @@ static void InitDeko3dFontTexture(ImGui_ImplDeko3d_Data *bd) {
   bd->queue.waitIdle();
 }
 
+int ImGui_ImplDeko3d_CreateTexture(const void *data, int width, int height) {
+  auto bd = (ImGui_ImplDeko3d_Data *)ImGui::GetIO().BackendRendererUserData;
+  DkDevice device = bd->device;
+  dk::CmdBuf cmdbuf = bd->cmdbuf[0];
+  cmdbuf.clear();
+
+  dk::UniqueMemBlock scratchMemBlock =
+      dk::MemBlockMaker(device,
+                        align(width * height * 4, DK_MEMBLOCK_ALIGNMENT))
+          .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
+          .create();
+  memcpy(scratchMemBlock.getCpuAddr(), data, width * height * 4);
+
+  auto tex_id = bd->tex_cnt++;
+  assert(tex_id < MAX_TEX_NUM);
+  bd->textureHandle[tex_id] = dkMakeTextureHandle(tex_id, tex_id);
+
+  dk::ImageLayout layout;
+  dk::ImageLayoutMaker{device}
+      .setFlags(0)
+      .setFormat(DkImageFormat_RGBA8_Unorm)
+      .setDimensions(width, height)
+      .initialize(layout);
+
+  bd->textureMemBlock[tex_id] =
+      dk::MemBlockMaker{
+          device, align(layout.getSize(), std::max(layout.getAlignment(),
+                                                   (u32)DK_MEMBLOCK_ALIGNMENT))}
+          .setFlags(DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image)
+          .create();
+
+  dk::Image image;
+  image.initialize(layout, bd->textureMemBlock[tex_id], 0);
+
+  auto descCpuAddr = (Descriptors *)bd->descriptorsMemBlock.getCpuAddr();
+  descCpuAddr->image[tex_id].initialize(image);
+  descCpuAddr->sampler[tex_id].initialize(
+      dk::Sampler{}
+          .setFilter(DkFilter_Linear, DkFilter_Linear)
+          .setWrapMode(DkWrapMode_ClampToEdge, DkWrapMode_ClampToEdge,
+                       DkWrapMode_ClampToEdge));
+
+  cmdbuf.copyBufferToImage({scratchMemBlock.getGpuAddr()}, dk::ImageView{image},
+                           {0, 0, 0, u32(width), u32(height), 1});
+  bd->queue.submitCommands(cmdbuf.finishList());
+  bd->queue.waitIdle();
+  return tex_id;
+}
+
+ImTextureID ImGui_ImplDeko3d_GetTextureId(int tex_id) {
+  auto bd = (ImGui_ImplDeko3d_Data *)ImGui::GetIO().BackendRendererUserData;
+  return (void *)(&bd->textureHandle[tex_id]);
+}
+
 static void InitDeko3dData(ImGui_ImplDeko3d_Data *bd) {
   bd->device = dk::DeviceMaker().create();
   bd->queue =
@@ -267,6 +334,8 @@ static void InitDeko3dData(ImGui_ImplDeko3d_Data *bd) {
   InitDeko3Shaders(bd);
 
   InitDeko3dSwapchain(bd);
+
+  InitDeko3dDescriptors(bd);
 
   InitDeko3dFontTexture(bd);
 
@@ -470,11 +539,11 @@ void ImGui_ImplDeko3d_RenderDrawData(ImDrawData *drawData) {
       cmdbuf.setScissors(0,
                          DkScissor{u32(clip.x), u32(clip.y),
                                    u32(clip.z - clip.x), u32(clip.w - clip.y)});
-      DkResHandle textureHandle = *(DkResHandle *)cmd.TextureId;
+      DkResHandle handle = *(DkResHandle *)cmd.TextureId;
       // check if we need to bind a new texture
-      if (textureHandle != boundTextureHandle) {
-        boundTextureHandle = textureHandle;
-        cmdbuf.bindTextures(DkStage_Fragment, 0, textureHandle);
+      if (handle != boundTextureHandle) {
+        boundTextureHandle = handle;
+        cmdbuf.bindTextures(DkStage_Fragment, 0, handle);
       }
       // draw the triangle list
       cmdbuf.drawIndexed(DkPrimitive_Triangles, cmd.ElemCount, 1,
