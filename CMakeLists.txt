@@ -24,6 +24,7 @@ target_compile_features(${TARGET} PUBLIC cxx_std_17)
 target_compile_definitions(${TARGET} PUBLIC
   IMGUI_DISABLE_OBSOLETE_KEYIO
   IMGUI_DISABLE_OBSOLETE_FUNCTIONS
+  IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS
   )
 
 target_link_libraries(${TARGET} PUBLIC

@@ -224,7 +224,7 @@ static void InitDeko3dFontTexture(ImGui_ImplDeko3d_Data *bd) {
 
   auto tex_id = bd->tex_cnt++;
   bd->textureHandle[tex_id] = dkMakeTextureHandle(tex_id, tex_id);
-  io.Fonts->SetTexID(&bd->textureHandle[tex_id]);
+  io.Fonts->SetTexID(ImGui_ImplDeko3d_GetTextureId(tex_id));
 
   // copy font data to scratch buffer
   unsigned char *pixels;
@@ -323,7 +323,7 @@ int ImGui_ImplDeko3d_CreateTexture(const void *data, int width, int height) {
 
 ImTextureID ImGui_ImplDeko3d_GetTextureId(int tex_id) {
   auto bd = (ImGui_ImplDeko3d_Data *)ImGui::GetIO().BackendRendererUserData;
-  return (void *)(&bd->textureHandle[tex_id]);
+  return (u64)(&bd->textureHandle[tex_id]);
 }
 
 static void InitDeko3dData(ImGui_ImplDeko3d_Data *bd) {
